@@ -1,0 +1,194 @@
+specification {
+  // ─────────────────────────
+  // Tipos de Elementos
+  // ─────────────────────────
+  element actor {
+    notation "Persona"
+    style { shape person; color primary }
+  }
+  
+  element system {
+    notation "Sistema de Software"
+    style { shape rectangle; color primary }
+  }
+  
+  element externalSystem {
+    notation "Sistema Externo"
+    style { shape rectangle; color muted }
+  }
+  
+  element frontend {
+    notation "Contenedor: Web SPA"
+    style { shape browser; color blue }
+  }
+  
+  element backend {
+    notation "Contenedor: API REST"
+    style { shape component; color blue }
+  }
+  
+  element database {
+    notation "Contenedor: Base de Datos"
+    style { shape storage; color blue }
+  }
+  
+  element smartcontract {
+    notation "Contenedor: Smart Contracts"
+    style { shape component; color indigo; border dashed }
+  }
+
+  // ─────────────────────────
+  // Etiquetas para Semántica
+  // ─────────────────────────
+  tag web3
+  tag offchain
+  tag e2e
+}
+
+model {
+  // ─────────────────────────
+  // Actores
+  // ─────────────────────────
+  votante = actor "Votante" {
+    description "Ciudadano empadronado con derecho a sufragio"
+  }
+  
+  autoridad = actor "Autoridad Electoral" {
+    description "Administrador responsable del ciclo de vida del comicio"
+  }
+  
+  auditor = actor "Auditor / Ciudadano" {
+    description "Observador público interesado en la integridad del escrutinio"
+  }
+
+  // ─────────────────────────
+  // Sistemas Externos
+  // ─────────────────────────
+  sso = externalSystem "SSO Institucional" {
+    technology "OAuth 2.0 / OpenID Connect"
+    description "Proveedor de identidad de la institución (Ej. CEUTI / UTN FRVM)"
+  }
+  
+    rpc = externalSystem "Proveedor de Nodos RPC" {
+    #web3
+    technology "Infura / Alchemy"
+    description "Gateway HTTP/WebSocket para interactuar con la cadena de bloques"
+  }
+  
+    ethereum = externalSystem "Red Ethereum" {
+    #web3
+    technology "Sepolia Testnet / EVM"
+    description "Blockchain pública para el registro inmutable y descentralizado de sufragios"
+  }
+
+  // ─────────────────────────
+  // Sistema Principal y Contenedores
+  // ─────────────────────────
+  votar = system "Plataforma VOTAR" {
+    description "Ecosistema de votación descentralizada garantizando anonimato y verificabilidad E2E"
+
+    // Capa Frontend
+    bud = frontend "Boleta Única Digital (BUD)" {
+      #e2e
+      technology "React.js / Ethers.js"
+      description "Interfaz para selección de candidatos, generación de claves ECC y firma de transacciones"
+    }
+    
+    panel = frontend "Panel de Administración" {
+      technology "React.js"
+      description "Interfaz para la gestión institucional del padrón y reglas electorales"
+    }
+    
+    dashboard = frontend "Dashboard Público" {
+      technology "React.js / Ethers.js"
+      description "Plataforma de auditoría ciudadana y visualización de resultados en tiempo real"
+    }
+
+    // Capa Backend Tradicional
+      api = backend "API Backend" {
+      #offchain
+      technology "Node.js / Python"
+      description "Motor lógico encargado de la desvinculación de identidad y construcción de Árboles de Merkle"
+    }
+    
+      db = database "Base de Datos Relacional" {
+      #offchain
+      technology "PostgreSQL"
+      description "Almacenamiento persistente de configuraciones institucionales y listas (sin datos de sufragios)"
+    }
+
+    // Capa Descentralizada
+      contracts = smartcontract "Ecosistema On-Chain" {
+      #web3
+      technology "Solidity"
+      description "Lógica de validación de Merkle Proofs, mitigación de doble voto y escrutinio inmutable (CEI)"
+    }
+  }
+
+  // ─────────────────────────
+  // Relaciones (Flujos de Datos e Interacciones)
+  // ─────────────────────────
+  
+  // Interacciones Actores -> Sistema (Frontend)
+  votante -> votar.bud "Se autentica, genera nulificador y sufraga" { technology "HTTPS" }
+  autoridad -> votar.panel "Configura elecciones y carga el padrón" { technology "HTTPS" }
+  auditor -> votar.dashboard "Monitorea escrutinio y traza eventos" { technology "HTTPS" }
+
+  // Interacciones Frontend -> Backend (Off-Chain)
+  votar.bud -> votar.api "Solicita validación y prueba de Merkle (Merkle Proof)" { technology "JSON/HTTPS" }
+  votar.panel -> votar.api "Envía configuración y ABM de candidatos" { technology "JSON/HTTPS" }
+  votar.api -> votar.db "Lee/Escribe configuraciones operativas" { technology "TCP/IP" }
+
+  // Interacción Backend -> Sistemas Externos (SSO)
+  votar.api -> sso "Valida identidad legal y consume Claims JWT" { technology "HTTPS" }
+
+  // Interacciones Sistema -> Blockchain (Web3)
+  votar.bud -> rpc "Envía voto firmado vía ECC (Payload + Proof)" { technology "JSON-RPC/HTTPS" }
+  votar.dashboard -> rpc "Consulta logs, eventos y mapeo de votos" { technology "JSON-RPC/HTTPS" }
+  rpc -> votar.contracts "Actúa como proxy de transacciones y lecturas hacia"
+  votar.contracts -> ethereum "Despliega código y muta el estado inmutable en"
+}
+
+views {
+  // ─────────────────────────
+  // Vistas Arquitectónicas
+  // ─────────────────────────
+
+  view context_view {
+    title "Diagrama de Contexto (Nivel 1) - Plataforma VOTAR"
+    description "Visión macroscópica de los actores involucrados y las dependencias externas del sistema."
+    
+    // Incluye solo los actores, el sistema abstraído y los servicios externos
+    include votante, autoridad, auditor
+    include votar
+    include sso, rpc, ethereum
+
+    autoLayout TopBottom
+  }
+
+  view    container_view of votar {
+    title "Diagrama de Contenedores (Nivel 2) - Plataforma VOTAR"
+    description "Despliegue interno de la Plataforma VOTAR mostrando la separación entre lógica off-chain y web3."
+    
+    include *
+    
+    // Aplicamos estilos visuales semánticos para diferenciar contextos
+    style votar.contracts { color indigo }
+    style rpc, ethereum { color gray }
+    
+    autoLayout LeftRight
+  }
+
+  // Vista dinámica opcional para ilustrar el flujo de sufragio
+  dynamic view sufragio_flow {
+    title "Flujo de Emisión de Sufragio con Desvinculación de Identidad"
+    
+    votante -> votar.bud "1. Inicia sesión"
+    votar.bud -> votar.api "2. Pide token OAuth"
+    votar.api -> sso "3. Autentica identidad"
+    sso -> votar.api "4. Confirma identidad legal"
+    votar.api -> votar.bud "5. Entrega Merkle Proof"
+    votar.bud -> rpc "6. Emite Voto Anónimo Firmado (Nulificador)"
+    rpc -> votar.contracts "7. Transmite a la EVM"
+  }
+}
