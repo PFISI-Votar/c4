@@ -204,7 +204,7 @@ model {
       }
       reportGenerator = component "Generador de Reportes Institucionales" {
         technology "Node.js / ReportLab"
-        description "Emite documentación oficial: acta de apertura/cierre, padrón firmado, reporte de participación. Consume eventos on-chain + datos relacionales"
+        description "Emite documentación oficial: acta de apertura/cierre, padrón, reporte de participación. Consume eventos on-chain + datos relacionales"
       }
       auditLogger = component "Registro de Auditoría (Audit Log)" {
         technology "Winston / structlog + append-only"
