@@ -144,6 +144,10 @@ model {
         technology "React Component"
         description "Define candidatos, fechas y parámetros electorales"
       }
+      revoteConfigurator = component "Configurador de Voto Múltiple" {
+        technology "React Form / Zod"
+        description "Panel para autoridad: habilita/inhabilita re-voto, define maxVotesPerVoter (1..N), minIntervalSeconds entre re-votos y política de cómputo (último voto cuenta). Valida coherencia y previsualiza impacto antes de guardar"
+      }
       rootPublisher = component "Publicador de Raíz Merkle" {
         technology "Ethers.js"
         description "Permite a la autoridad publicar la Merkle Root calculada on-chain antes de apertura del comicio"
@@ -184,7 +188,11 @@ model {
       }
       rulesEngine = component "Motor de Reglas Electorales" {
         technology "TypeScript / Pydantic"
-        description "Valida reglas de negocio antes de oficializar: mínimo de candidatos, voto en blanco habilitado, ventanas temporales del comicio, bajas/sucesiones bloqueadas tras inicio (RB ‘Bajas y sucesiones’, ‘Mínimo de candidatos’)"
+        description "Valida reglas de negocio antes de oficializar: mínimo de candidatos, voto en blanco habilitado, ventanas temporales, bajas/sucesiones bloqueadas tras inicio, y política de voto múltiple (revoteEnabled, maxVotesPerVoter ≥1, minIntervalSeconds ≥0, coherencia con ventana del comicio)"
+      }
+      revotePolicyService = component "Servicio de Política de Re-voto" {
+        technology "Node.js Service"
+        description "Materializa la política configurada por la autoridad: persiste {revoteEnabled, maxVotesPerVoter, minIntervalSeconds, tallyPolicy=LAST_WINS}, sincroniza parámetros con el deployment del BallotContract vía ElectionFactory y expone consulta al BUD para UI/feedback (intentos restantes, próximo reintento)"
       }
       lifecycleManager = component "Gestor de Ciclo de Vida Electoral" {
         technology "Node.js Service"
@@ -223,7 +231,7 @@ model {
 
       electionSchema = component "Esquema de Comicios" {
         technology "PostgreSQL Schema"
-        description "Comicios, ventanas temporales, parámetros, direcciones de contratos desplegados y Merkle Roots publicadas"
+        description "Comicios, ventanas temporales, parámetros, direcciones de contratos desplegados, Merkle Roots publicadas y política de voto múltiple (revote_enabled BOOL, max_votes_per_voter INT, min_interval_seconds INT, tally_policy ENUM)"
       }
       candidateSchema = component "Esquema de Categorías y Listas" {
         technology "PostgreSQL Schema"
@@ -253,7 +261,7 @@ model {
       electionFactory = component "ElectionFactory.sol" {
         #web3
         technology "Solidity / UUPS Proxy Factory"
-        description "Despliega y registra instancias de BallotContract + VoteRegistry + TallyContract + AuditView por comicio. Solo ELECTION_ADMIN_ROLE puede crear elecciones. Emite ElectionCreated(uint256 electionId, address ballot, address tally)"
+        description "Despliega y registra instancias de BallotContract + VoteRegistry + TallyContract + AuditView por comicio. Recibe struct RevoteConfig{bool enabled; uint16 maxVotesPerVoter; uint32 minIntervalSeconds; TallyPolicy policy} en createElection() e inmutabiliza la política tras apertura. Solo ELECTION_ADMIN_ROLE. Emite ElectionCreated(electionId, ballot, tally, revoteConfig)"
       }
 
       // ── Contrato de Votación Principal ──────────────────────────────
@@ -262,7 +270,7 @@ model {
       ballotContract = component "BallotContract.sol" {
         #web3
         technology "Solidity / UUPSUpgradeable"
-        description "Orquesta castVote(): valida ventana temporal, verifica Merkle Proof (padrón), verifica firma ECDSA del votante (Ley 25.506), delega registro al VoteRegistry y notifica al TallyContract. Soporta voto en blanco y voto nulo como candidateId reservados. Patrón CEI + ReentrancyGuard"
+        description "Orquesta castVote(): valida ventana temporal, Merkle Proof (padrón), firma ECDSA (Ley 25.506) y política de voto múltiple. Aplica modifiers: enforceRevoteLimits(nullifier) → revert si !revoteEnabled && voteCount[nullifier]>0; revert si voteCount[nullifier] >= maxVotesPerVoter; revert si block.timestamp - lastVoteTs[nullifier] < minIntervalSeconds (custom errors: RevoteDisabled, MaxVotesReached, RetryTooSoon(remainingSeconds)). Delega al VoteRegistry y notifica al TallyContract. Soporta candidateId reservados BLANCO/NULO. Patrón CEI + ReentrancyGuard"
       }
 
       // ── Registro de Votos (estado canónico de sufragios) ────────────
@@ -272,7 +280,7 @@ model {
       voteRegistry = component "VoteRegistry.sol" {
         #web3 #security
         technology "Solidity Smart Contract"
-        description "Mapping(electionId => mapping(bytes32 nullifier => CastVote{candidateId, blockNumber, txHash})). Permite sobrescritura mientras la elección esté abierta (regla ‘último voto cuenta’). Tras cierre queda inmutable. Solo BALLOT_ROLE puede escribir. Emite VoteCast(electionId, nullifier, candidateId, isOverwrite)"
+        description "Mapping(electionId => mapping(bytes32 nullifier => VoterState{candidateId, voteCount uint16, lastVoteTs uint64, txHash})). Permite sobrescritura mientras la elección esté abierta según RevoteConfig: incrementa voteCount, actualiza lastVoteTs y candidateId (tallyPolicy=LAST_WINS). Tras cierre inmutable. Solo BALLOT_ROLE escribe. View pública getVoterState(nullifier) → expone intentos restantes y próximo retry. Emite VoteCast(electionId, nullifier, candidateId, voteCount, isOverwrite)"
       }
 
       // ── Contador / Escrutinio ───────────────────────────────────────
@@ -291,7 +299,7 @@ model {
       auditViewContract = component "AuditViewContract.sol" {
         #web3
         technology "Solidity Smart Contract (view/pure)"
-        description "Funciones de solo lectura para auditores externos: verifyReceipt(txHash), getElectionState(id), getTurnout(id), getMerkleRootUsed(id). No muta estado; permite recálculo independiente del escrutinio (Verificabilidad Universal)"
+        description "Funciones de solo lectura para auditores externos: verifyReceipt(txHash), getElectionState(id), getTurnout(id), getMerkleRootUsed(id), getRevoteConfig(id), getRevoteStats(id) → (totalRevotes, uniqueVoters, overwriteRatio). No muta estado; permite recálculo independiente del escrutinio (Verificabilidad Universal)"
       }
 
       // ── Almacenamiento de Merkle Roots ───────────────────────────────
@@ -343,6 +351,7 @@ model {
   autoridad -> votar.panel.adminAuth "Se autentica como administrador" { technology "HTTPS" }
   autoridad -> votar.panel.voterManager "Carga y valida el padrón de votantes" { technology "HTTPS" }
   autoridad -> votar.panel.electionConfig "Configura parámetros y comicios" { technology "HTTPS" }
+  autoridad -> votar.panel.revoteConfigurator "Define política de voto múltiple (habilitación, máx intentos, intervalo)" { technology "HTTPS" }
   autoridad -> votar.panel.rootPublisher "Publica Merkle Root on-chain antes de abrir comicio" { technology "HTTPS / Web3" }
   auditor -> votar.dashboard.statsViewer "Visualiza estadísticas de participación" { technology "HTTPS" }
   auditor -> votar.dashboard.localVerifier "Verifica integridad del sufragio de forma local" { technology "HTTPS" }
@@ -357,12 +366,19 @@ model {
   votar.bud.proofRequester -> votar.api.apiRouter "Solicita Merkle Proof autenticado" { technology "JSON/HTTPS" }
   votar.panel.voterManager -> votar.api.apiRouter "Envía CSV de padrón para procesamiento" { technology "multipart/HTTPS" }
   votar.panel.electionConfig -> votar.api.apiRouter "Envía configuración del comicio" { technology "JSON/HTTPS" }
+  votar.panel.revoteConfigurator -> votar.api.apiRouter "Envía RevoteConfig para validación y persistencia" { technology "JSON/HTTPS" }
+  votar.bud.ballot -> votar.api.apiRouter "Consulta intentos restantes y próximo retry permitido" { technology "JSON/HTTPS" }
   votar.dashboard.statsViewer -> votar.api.apiRouter "Consulta reportes institucionales y metadatos off-chain" { technology "JSON/HTTPS" }
 
   // Flujo interno API Backend
   votar.api.apiRouter -> votar.api.jwtValidator "Valida JWT en cada request"
   votar.api.jwtValidator -> sso "Obtiene JWKS y valida claims OIDC" { technology "HTTPS" }
   votar.api.apiRouter -> votar.api.rulesEngine "Valida reglas electorales antes de oficializar"
+  votar.api.apiRouter -> votar.api.revotePolicyService "Persiste/consulta política de voto múltiple"
+  votar.api.revotePolicyService -> votar.api.rulesEngine "Valida coherencia de RevoteConfig"
+  votar.api.revotePolicyService -> votar.api.dataAccess "Persiste config en electionSchema"
+  votar.api.revotePolicyService -> votar.api.lifecycleManager "Inyecta RevoteConfig en createElection() de la factory"
+  votar.api.revotePolicyService -> rpc "Consulta getVoterState(nullifier) para feedback al BUD" { technology "JSON-RPC/HTTPS" }
   votar.api.apiRouter -> votar.api.lifecycleManager "Solicita apertura/cierre del comicio"
   votar.api.apiRouter -> votar.api.voterCsvProcessor "Procesa padrón cargado por la autoridad"
   votar.api.apiRouter -> votar.api.identityDecoupler "Solicita credencial anónima desvinculada"
@@ -411,7 +427,7 @@ model {
   votar.contracts.ballotContract -> votar.contracts.merkleRootStore "Consulta Merkle Root activa en castVote()"
   votar.contracts.ballotContract -> votar.contracts.ozMerkleProof "MerkleProof.verify(proof, root, leaf): valida padrón"
   votar.contracts.ballotContract -> votar.contracts.ozECDSA "ECDSA.recover(payload, sig): verifica Firma Digital (Ley 25.506)"
-  votar.contracts.ballotContract -> votar.contracts.voteRegistry "Registra/sobrescribe voto (regla ‘último voto cuenta’)"
+  votar.contracts.ballotContract -> votar.contracts.voteRegistry "Lee voteCount/lastVoteTs, valida RevoteConfig y registra/sobrescribe voto (LAST_WINS)"
   votar.contracts.ballotContract -> votar.contracts.tallyContract "Actualiza contadores por delta (incl. blanco/nulo)"
   votar.contracts.ballotContract -> votar.contracts.ozPausable "whenNotPaused modifier en castVote()"
   votar.contracts.ballotContract -> votar.contracts.ozAccessControl "onlyRole(PAUSER_ROLE) en pause()/unpause()"
