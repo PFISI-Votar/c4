@@ -30,8 +30,7 @@ jobs:
         with:
           action: build
           output: dist
-          # Base path is automatically injected for repository subpaths (e.g. username.github.io/repo)
-          base: ${{ steps.pages.outputs.base_path }}
+          base: '/'
           likec4-version: latest
 
       - name: Upload artifact
