@@ -24,7 +24,7 @@ specification {
   
   element backend {
     notation "Contenedor: API REST"
-    style { shape component; color blue }
+    style { shape rectangle; color blue }
   }
   
   element database {
@@ -34,18 +34,18 @@ specification {
   
   element smartcontract {
     notation "Contenedor: Smart Contracts"
-    style { shape component; color indigo; border dashed }
+    style { shape rectangle; color indigo; border dashed }
   }
 
   // Nueva distinción: librería OZ vs contrato propio
   element ozlibrary {
     notation "Librería OpenZeppelin"
-    style { shape component; color green; border dashed }
+    style { shape rectangle; color green; border dashed }
   }
   
   element component {
     notation "Componente de Software"
-    style { shape component; color secondary }
+    style { shape rectangle; color secondary }
   }
 
   // ─────────────────────────
@@ -114,6 +114,10 @@ model {
         technology "React Component"
         description "Interfaz para la selección de boletas y candidatos"
       }
+      selection = component "Confirmación de Boleta Única Digital" {
+        technology "React Component / Fetch API"
+        description "Consulta la boleta digital del comicio y confirma el voto con clave idempotente. Envía solo hashes de recepción al backend; no persiste selección en claro"
+      }
       cryptoEngine = component "Generador Criptográfico" {
         technology "Web Crypto API"
         description "Genera claves efímeras ECC, firma sufragios y calcula nulificadores en el cliente"
@@ -141,8 +145,16 @@ model {
         description "Permite cargar, validar y procesar la lista de votantes habilitados"
       }
       electionConfig = component "Configurador de Comicios" {
-        technology "React Component"
-        description "Define candidatos, fechas y parámetros electorales"
+        technology "React / react-hook-form / Zod"
+        description "Formulario /comicios/nuevo: alta en BORRADOR con nombre, fechas UTC ISO8601, tipo de votación (POR_CANDIDATO | POR_LISTA | MIXTO), roles dinámicos con límite de postulantes, métodos de autenticación (Google, SSO Institucional — mín. 1) y validación client-side antes de POST /elecciones (US-316)"
+      }
+      ofertaElectoralPanel = component "Gestor de Oferta Electoral" {
+        technology "React / TanStack Query / Zod"
+        description "CRUD de listas y candidatos, acordeón de candidatos por lista, confirmación antes de oficializar comicio y visualización del mapeo list_id (US-318)"
+      }
+      configDatosCandidatoPanel = component "Configurador Datos Candidato" {
+        technology "React / react-hook-form"
+        description "Define campos dinámicos por comicio (clave, tipo, obligatoriedad, validaciones). Bloqueo si hay candidatos registrados o comicio oficializado"
       }
       revoteConfigurator = component "Configurador de Voto Múltiple" {
         technology "React Form / Zod"
@@ -212,11 +224,19 @@ model {
       }
       reportGenerator = component "Generador de Reportes Institucionales" {
         technology "Node.js / ReportLab"
-        description "Emite documentación oficial: acta de apertura/cierre, padrón, reporte de participación. Consume eventos on-chain + datos relacionales"
+        description "Emite documentación oficial: acta de apertura/cierre, padrón firmado, reporte de participación. Consume eventos on-chain + datos relacionales"
       }
       auditLogger = component "Registro de Auditoría (Audit Log)" {
         technology "Winston / structlog + append-only"
         description "Registra toda acción crítica (login admin, carga padrón, publicación raíz, apertura/cierre). Inmutable a nivel aplicación; expone consulta de auditoría"
+      }
+      eleccionModule = component "Módulo Elección (NestJS)" {
+        technology "NestJS 11 / TypeORM"
+        description "POST /elecciones: crea comicio en BORRADOR (elección, boleta, categorías/roles, configuracion_comicio, configuracion_datos_candidato) en transacción ACID sin escrituras Sepolia. Valida fechas futuras, roles y auth (422). Sanitiza entrada. Subdominios lista/ y candidato/: CRUD, oficialización list_id (US-316 + US-318)"
+      }
+      votoModule = component "Módulo Voto (NestJS)" {
+        technology "NestJS 11 / TypeORM"
+        description "GET /elecciones/:idEleccion/boleta-digital devuelve la BUD oficializada. POST /elecciones/:idEleccion/votos/confirmar registra recepción off-chain con votante_hash, idempotency_key, payload_hash y comprobante_hash; no almacena selección en claro"
       }
       dataAccess = component "Acceso a Datos (DAO)" {
         technology "Prisma / SQLAlchemy"
@@ -231,15 +251,19 @@ model {
 
       electionSchema = component "Esquema de Comicios" {
         technology "PostgreSQL Schema"
-        description "Comicios, ventanas temporales, parámetros, direcciones de contratos desplegados, Merkle Roots publicadas y política de voto múltiple (revote_enabled BOOL, max_votes_per_voter INT, min_interval_seconds INT, tally_policy ENUM)"
+        description "Tablas eleccion (tipo_votacion, estado BORRADOR), configuracion_comicio (metodos_autenticacion[], politica_revoto), ventanas temporales, parámetros de re-voto y direcciones de contratos/Merkle Roots (solo post-borrador). Política US-316: sin txs Sepolia en alta BORRADOR"
       }
       candidateSchema = component "Esquema de Categorías y Listas" {
-        technology "PostgreSQL Schema"
-        description "Categorías electorales (ej. Presidente, Vocales), agrupaciones/listas y candidatos asociados"
+        technology "PostgreSQL Schema (candidateSchema)"
+        description "Boleta, categorías, listas (list_id post-oficialización), candidatos (datos_adicionales JSONB), configuracion_datos_candidato y campo_datos_candidato"
       }
       voterSchema = component "Esquema de Padrón" {
         technology "PostgreSQL Schema"
         description "Hashes del padrón habilitado por elección, vinculados a la hoja Merkle correspondiente"
+      }
+      votoConfirmacionSchema = component "Tabla voto_confirmacion" {
+        technology "PostgreSQL Table"
+        description "Recepción BUD off-chain: id_eleccion, votante_hash, idempotency_key, payload_hash, comprobante_hash, estado RECIBIDO y recibido_en. Solo hashes + idempotencia, sin selección en claro"
       }
       auditLogSchema = component "Esquema de Audit Log" {
         technology "PostgreSQL Schema (append-only)"
@@ -261,7 +285,7 @@ model {
       electionFactory = component "ElectionFactory.sol" {
         #web3
         technology "Solidity / UUPS Proxy Factory"
-        description "Despliega y registra instancias de BallotContract + VoteRegistry + TallyContract + AuditView por comicio. Recibe struct RevoteConfig{bool enabled; uint16 maxVotesPerVoter; uint32 minIntervalSeconds; TallyPolicy policy} en createElection() e inmutabiliza la política tras apertura. Solo ELECTION_ADMIN_ROLE. Emite ElectionCreated(electionId, ballot, tally, revoteConfig)"
+        description "Despliega y registra instancias de BallotContract + VoteRegistry + TallyContract + AuditView por comicio. Recibe struct RevoteConfig{bool enabled; uint16 maxVotesPerVoter; uint32 minIntervalSeconds; TallyPolicy policy} en createElection() e inmutabiliza la política tras apertura. Solo DEFAULT_ADMIN_ROLE (Multisig). Emite ElectionCreated(electionId, ballot, tally, revoteConfig)"
       }
 
       // ── Contrato de Votación Principal ──────────────────────────────
@@ -309,6 +333,19 @@ model {
         description "Almacena y versiona Merkle Roots publicadas por la autoridad (MERKLE_UPDATER_ROLE). Mapping: electionId => bytes32 root + timestamp. Inmutable tras apertura del comicio. Emite RootPublished(electionId, root)"
       }
 
+      // ── Base RBAC (US-349 — implementado) ───────────────────────────
+      votarAccessControl = component "VotarAccessControl.sol" {
+        #web3 #security
+        technology "Solidity ^0.8.24 / OpenZeppelin AccessControl + Pausable"
+        description "Base abstracta RBAC del ecosistema (US-349). Roles: DEFAULT_ADMIN_ROLE (Multisig/Governor al deploy), PAUSER_ROLE, MERKLE_UPDATER_ROLE, BALLOT_ROLE. Constructor asigna admin; grant/revoke emite RoleGranted/RoleRevoked. Desplegado en Sepolia vía AccessControlHarness para UAT. Contratos electorales futuros heredan esta base"
+      }
+
+      accessControlHarness = component "AccessControlHarness.sol" {
+        #web3 #security
+        technology "Solidity / mock de integración"
+        description "Contrato concreto de prueba US-349: hereda VotarAccessControl y expone updateMerkleRoot (MERKLE_UPDATER_ROLE) y recordBallotOp (BALLOT_ROLE + whenNotPaused). Sepolia: 0x55d1d115309872C16B9646362C82fFa246F3F652"
+      }
+
       // ── Librería OZ: MerkleProof ─────────────────────────────────────
       ozMerkleProof = ozlibrary "OZ: MerkleProof.sol" {
         #openzeppelin
@@ -329,7 +366,7 @@ model {
       ozAccessControl = ozlibrary "OZ: AccessControl.sol" {
         #openzeppelin #security
         technology "OpenZeppelin v5 / Solidity Library"
-        description "RBAC: ELECTION_ADMIN_ROLE (autoridad), PAUSER_ROLE (emergencia), MERKLE_UPDATER_ROLE (publicación raíz), BALLOT_ROLE (escritura en VoteRegistry/Tally). Hereda AccessControlDefaultAdminRules"
+        description "Librería base RBAC de OpenZeppelin. VotarAccessControl la extiende con roles PAUSER, MERKLE_UPDATER y BALLOT; DEFAULT_ADMIN_ROLE centraliza grant/revoke hacia Multisig/Governor"
       }
 
       // ── Librería OZ: Pausable ────────────────────────────────────────
@@ -351,6 +388,8 @@ model {
   autoridad -> votar.panel.adminAuth "Se autentica como administrador" { technology "HTTPS" }
   autoridad -> votar.panel.voterManager "Carga y valida el padrón de votantes" { technology "HTTPS" }
   autoridad -> votar.panel.electionConfig "Configura parámetros y comicios" { technology "HTTPS" }
+  autoridad -> votar.panel.ofertaElectoralPanel "Gestiona listas, candidatos y oficialización" { technology "HTTPS" }
+  autoridad -> votar.panel.configDatosCandidatoPanel "Define campos adicionales de candidatos" { technology "HTTPS" }
   autoridad -> votar.panel.revoteConfigurator "Define política de voto múltiple (habilitación, máx intentos, intervalo)" { technology "HTTPS" }
   autoridad -> votar.panel.rootPublisher "Publica Merkle Root on-chain antes de abrir comicio" { technology "HTTPS / Web3" }
   auditor -> votar.dashboard.statsViewer "Visualiza estadísticas de participación" { technology "HTTPS" }
@@ -358,6 +397,8 @@ model {
 
   // Flujo interno BUD
   votar.bud.auth -> votar.bud.proofRequester "Provee identidad validada para solicitar Merkle Proof"
+  votar.bud.ballot -> votar.bud.selection "Entrega selección revisada para confirmar BUD"
+  votar.bud.selection -> votar.bud.cryptoEngine "Calcula payload_hash y comprobante_hash sin persistir selección en claro"
   votar.bud.ballot -> votar.bud.cryptoEngine "Envía selección para firmar y procesar"
   votar.bud.cryptoEngine -> votar.bud.blockchainClient "Entrega voto firmado, nulificador y parámetros"
   votar.bud.proofRequester -> votar.bud.blockchainClient "Entrega Merkle Proof para la transacción"
@@ -365,15 +406,22 @@ model {
   // Frontends -> API Backend
   votar.bud.proofRequester -> votar.api.apiRouter "Solicita Merkle Proof autenticado" { technology "JSON/HTTPS" }
   votar.panel.voterManager -> votar.api.apiRouter "Envía CSV de padrón para procesamiento" { technology "multipart/HTTPS" }
-  votar.panel.electionConfig -> votar.api.apiRouter "Envía configuración del comicio" { technology "JSON/HTTPS" }
+  votar.panel.electionConfig -> votar.api.apiRouter "Crea comicio en BORRADOR (POST /elecciones)" { technology "JSON/HTTPS" }
+  votar.panel.ofertaElectoralPanel -> votar.api.apiRouter "CRUD listas/candidatos y oficialización" { technology "JSON/HTTPS" }
+  votar.panel.configDatosCandidatoPanel -> votar.api.apiRouter "Guarda definición de campos dinámicos" { technology "JSON/HTTPS" }
   votar.panel.revoteConfigurator -> votar.api.apiRouter "Envía RevoteConfig para validación y persistencia" { technology "JSON/HTTPS" }
+  votar.bud.selection -> votar.api.apiRouter "Consulta BUD y confirma recepción idempotente (GET /elecciones/:idEleccion/boleta-digital, POST /elecciones/:idEleccion/votos/confirmar)" { technology "JSON/HTTPS" }
   votar.bud.ballot -> votar.api.apiRouter "Consulta intentos restantes y próximo retry permitido" { technology "JSON/HTTPS" }
   votar.dashboard.statsViewer -> votar.api.apiRouter "Consulta reportes institucionales y metadatos off-chain" { technology "JSON/HTTPS" }
 
   // Flujo interno API Backend
   votar.api.apiRouter -> votar.api.jwtValidator "Valida JWT en cada request"
   votar.api.jwtValidator -> sso "Obtiene JWKS y valida claims OIDC" { technology "HTTPS" }
-  votar.api.apiRouter -> votar.api.rulesEngine "Valida reglas electorales antes de oficializar"
+  votar.api.apiRouter -> votar.api.eleccionModule "Enruta creación de comicio y oferta electoral (US-316 / US-318)"
+  votar.api.eleccionModule -> votar.api.dataAccess "Transacción crearCompleta: elección, boleta, roles, config"
+  votar.api.eleccionModule -> votar.api.rulesEngine "Valida reglas antes de oficializar"
+  votar.api.apiRouter -> votar.api.votoModule "Enruta BUD y confirmación de voto (US-355)"
+  votar.api.votoModule -> votar.api.dataAccess "Lee boleta oficializada y registra voto_confirmacion idempotente"
   votar.api.apiRouter -> votar.api.revotePolicyService "Persiste/consulta política de voto múltiple"
   votar.api.revotePolicyService -> votar.api.rulesEngine "Valida coherencia de RevoteConfig"
   votar.api.revotePolicyService -> votar.api.dataAccess "Persiste config en electionSchema"
@@ -400,6 +448,7 @@ model {
   votar.api.dataAccess -> votar.db.electionSchema "Lee/escribe comicios y direcciones de contrato" { technology "TCP/IP" }
   votar.api.dataAccess -> votar.db.candidateSchema "Lee/escribe categorías, listas y candidatos" { technology "TCP/IP" }
   votar.api.dataAccess -> votar.db.voterSchema "Lee/escribe hashes de padrón" { technology "TCP/IP" }
+  votar.api.dataAccess -> votar.db.votoConfirmacionSchema "Inserta/consulta confirmaciones BUD por votante_hash e idempotency_key" { technology "TCP/IP" }
   votar.api.dataAccess -> votar.db.auditLogSchema "Append-only de bitácora" { technology "TCP/IP" }
 
   // Panel Admin -> Blockchain (publicación de raíz)
@@ -411,7 +460,7 @@ model {
   votar.dashboard.localVerifier -> votar.dashboard.blockScanner "Valida prueba contra raíz on-chain"
 
   // RPC -> Smart Contracts
-  rpc -> votar.contracts.electionFactory "Proxy para createElection() (ELECTION_ADMIN_ROLE)"
+  rpc -> votar.contracts.electionFactory "Proxy para createElection() (DEFAULT_ADMIN_ROLE)"
   rpc -> votar.contracts.ballotContract "Proxy para castVote() y lecturas de estado"
   rpc -> votar.contracts.merkleRootStore "Proxy para publishRoot() (MERKLE_UPDATER_ROLE)"
   rpc -> votar.contracts.tallyContract "Lecturas view del escrutinio para Dashboard"
@@ -422,6 +471,11 @@ model {
   votar.contracts.electionFactory -> votar.contracts.voteRegistry "Despliega VoteRegistry asociado"
   votar.contracts.electionFactory -> votar.contracts.tallyContract "Despliega TallyContract asociado"
   votar.contracts.electionFactory -> votar.contracts.auditViewContract "Despliega AuditView asociado"
+  votar.contracts.electionFactory -> votar.contracts.votarAccessControl "Hereda RBAC; asigna DEFAULT_ADMIN_ROLE al Multisig en deploy"
+  votar.contracts.ballotContract -> votar.contracts.votarAccessControl "Hereda VotarAccessControl (futuro)"
+  votar.contracts.accessControlHarness -> votar.contracts.votarAccessControl "Hereda base RBAC (UAT Sepolia US-349)"
+  votar.contracts.votarAccessControl -> votar.contracts.ozAccessControl "Extiende AccessControl OZ v5"
+  votar.contracts.votarAccessControl -> votar.contracts.ozPausable "Extiende Pausable; pause/unpause con PAUSER_ROLE"
   votar.contracts.electionFactory -> votar.contracts.ozAccessControl "Configura roles iniciales en deployment"
 
   votar.contracts.ballotContract -> votar.contracts.merkleRootStore "Consulta Merkle Root activa en castVote()"
