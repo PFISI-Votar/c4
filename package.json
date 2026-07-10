@@ -1,4 +1,8 @@
 {
+  "scripts": {
+    "test": "likec4 validate .",
+    "validate": "likec4 validate ."
+  },
   "devDependencies": {
     "likec4": "^1.38.1"
   }
