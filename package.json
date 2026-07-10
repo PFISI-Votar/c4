@@ -4,6 +4,6 @@
     "validate": "likec4 validate ."
   },
   "devDependencies": {
-    "likec4": "^1.38.1"
+    "likec4": "^1.58.0"
   }
 }
