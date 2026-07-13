@@ -298,7 +298,7 @@ model {
       ballotContract = component "BallotContract.sol" {
         #web3
         technology "Solidity / VotarAccessControl + MerkleProof + EIP-712 (OZ v5)"
-        description "US-339: castVote(electionId, voterLeaf, merkleProof). VOTAR-357/358: castSignedVote(..., nullifier, selectionHash, timestamp, expectedSigner, signature) valida Merkle + EIP-712 y rechaza NullifierAlreadyUsed. VOTAR-321: _assertElectionAcceptingVotes consulta MerkleRootStore (estado OPEN + endTime) y revierte ElectionClosed si CLOSED/TALLIED o block.timestamp >= endTime. Emite SignedVoteCast. Leaf = standardLeafHash(bytes32 hash_hoja). Patrón CEI + whenNotPaused"
+        description "US-339: castVote(electionId, voterLeaf, merkleProof, candidateId). VOTAR-357/358: castSignedVote(..., nullifier, selectionHash, timestamp, expectedSigner, signature, candidateId) valida Merkle + EIP-712 y rechaza NullifierAlreadyUsed. VOTAR-321: ElectionClosed si CLOSED/TALLIED o block.timestamp >= endTime. VOTAR-346: delega recordVote a VoteRegistry (voterHash=nullifier en firmado). Emite SignedVoteCast (recibo). Leaf = standardLeafHash(bytes32). whenNotPaused"
       }
 
       // ── Registro de Votos (estado canónico de sufragios) ────────────
@@ -307,8 +307,8 @@ model {
       // cuenta el último voto registrado antes del cierre.
       voteRegistry = component "VoteRegistry.sol" {
         #web3 #security
-        technology "Solidity Smart Contract"
-        description "Mapping(electionId => mapping(bytes32 nullifier => VoterState{candidateId, voteCount uint16, lastVoteTs uint64, txHash})). Permite sobrescritura mientras la elección esté abierta según RevoteConfig: incrementa voteCount, actualiza lastVoteTs y candidateId (tallyPolicy=LAST_WINS). Tras cierre inmutable. Solo BALLOT_ROLE escribe. View pública getVoterState(nullifier) → expone intentos restantes y próximo retry. Emite VoteCast(electionId, nullifier, candidateId, voteCount, isOverwrite)"
+        technology "Solidity / VotarAccessControl (VOTAR-346/350)"
+        description "Registro canónico keyed por voterHash anónimo (nullifier). recordVote solo BALLOT_ROLE + whenNotPaused. Emite VoteCast(electionId indexed, voterHash indexed, candidateId, isOverwrite) sin wallet. Tallies O(1) incl. VOTO_BLANCO/VOTO_NULO. VOTAR-350 views: getParticipationStats, getVotesByCandidate, verifyReceipt(receiptHash=voterHash). Pause no bloquea lecturas"
       }
 
       // ── Contador / Escrutinio ───────────────────────────────────────
@@ -326,8 +326,8 @@ model {
       // "Smart Contract de Verificación y Auditoría Pública".
       auditViewContract = component "AuditViewContract.sol" {
         #web3
-        technology "Solidity Smart Contract (view/pure)"
-        description "Funciones de solo lectura para auditores externos: verifyReceipt(txHash), getElectionState(id), getTurnout(id), getMerkleRootUsed(id), getRevoteConfig(id), getRevoteStats(id) → (totalRevotes, uniqueVoters, overwriteRatio). No muta estado; permite recálculo independiente del escrutinio (Verificabilidad Universal)"
+        technology "Solidity Smart Contract (view) — VOTAR-350"
+        description "Fachada pública sin gas para auditores: getElectionState(electionId), getParticipationStats → (totalVotes, blankVotes, nullVotes), getVotesByCandidate(electionId, candidateId) → 0 si desconocido, verifyReceipt(receiptHash) → bool (ancla nullifier/voterHash, sin identidad). Delega a MerkleRootStore + VoteRegistry. Sin whenNotPaused: lecturas disponibles con registro en pausa (UAT-04)"
       }
 
       // ── Almacenamiento de Merkle Roots ───────────────────────────────
@@ -470,7 +470,7 @@ model {
   rpc -> votar.contracts.ballotContract "Proxy para castSignedVote()/castVote() y lecturas de estado"
   rpc -> votar.contracts.merkleRootStore "Proxy para publishRoot() (MERKLE_UPDATER_ROLE)"
   rpc -> votar.contracts.tallyContract "Lecturas view del escrutinio para Dashboard"
-  rpc -> votar.contracts.auditViewContract "Lecturas pure/view para auditores externos"
+  rpc -> votar.contracts.auditViewContract "Lecturas view sin gas (VOTAR-350): estado, participación, tallies, recibos"
 
   // Flujo interno On-Chain
   votar.contracts.electionFactory -> votar.contracts.ballotContract "Despliega BallotContract por comicio"
@@ -487,18 +487,17 @@ model {
   votar.contracts.ballotContract -> votar.contracts.merkleRootStore "Consulta Merkle Root + ElectionState/endTime en castVote()/castSignedVote()"
   votar.contracts.ballotContract -> votar.contracts.ozMerkleProof "MerkleProof.verify(proof, root, leaf): valida padrón"
   votar.contracts.ballotContract -> votar.contracts.ozECDSA "ECDSA.recover(payload, sig): verifica Firma Digital (Ley 25.506)"
-  votar.contracts.ballotContract -> votar.contracts.voteRegistry "Lee voteCount/lastVoteTs, valida RevoteConfig y registra/sobrescribe voto (LAST_WINS)"
-  votar.contracts.ballotContract -> votar.contracts.tallyContract "Actualiza contadores por delta (incl. blanco/nulo)"
-  votar.contracts.ballotContract -> votar.contracts.ozPausable "whenNotPaused modifier en castVote()"
+  votar.contracts.ballotContract -> votar.contracts.voteRegistry "recordVote(electionId, voterHash, candidateId) — VOTAR-346; LAST_WINS en tallies del registry"
+  votar.contracts.ballotContract -> votar.contracts.tallyContract "Futuro: delta de escrutinio dedicado (hoy tallies viven en VoteRegistry)"
+  votar.contracts.ballotContract -> votar.contracts.ozPausable "whenNotPaused modifier en castVote()/castSignedVote()"
   votar.contracts.ballotContract -> votar.contracts.ozAccessControl "onlyRole(PAUSER_ROLE) en pause()/unpause()"
-  votar.contracts.ballotContract -> ethereum "Emite VoteCast(electionId, nullifier, candidateId, isOverwrite)"
+  votar.contracts.ballotContract -> ethereum "Emite SignedVoteCast; VoteRegistry emite VoteCast indexado (electionId, voterHash)"
 
   votar.contracts.voteRegistry -> votar.contracts.ozAccessControl "onlyRole(BALLOT_ROLE): solo BallotContract escribe"
   votar.contracts.tallyContract -> votar.contracts.ozAccessControl "onlyRole(BALLOT_ROLE) para mutar contadores"
   votar.contracts.merkleRootStore -> votar.contracts.ozAccessControl "onlyRole(MERKLE_UPDATER_ROLE)"
-  votar.contracts.auditViewContract -> votar.contracts.voteRegistry "Lee estado de votos (view)"
-  votar.contracts.auditViewContract -> votar.contracts.tallyContract "Lee contadores (view)"
-  votar.contracts.auditViewContract -> votar.contracts.merkleRootStore "Lee raíz utilizada (view)"
+  votar.contracts.auditViewContract -> votar.contracts.voteRegistry "getParticipationStats / getVotesByCandidate / verifyReceipt (VOTAR-350)"
+  votar.contracts.auditViewContract -> votar.contracts.merkleRootStore "getElectionState (view)"
 }
 
 views {
