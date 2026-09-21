@@ -959,4 +959,29 @@ views {
     autoridad -> votar.panel.adminAuth "4. Login admin; cookies solo tras 2FA"
     votar.panel.adminAuth -> votar.api.apiRouter "5. Set-Cookie access+refresh SameSite=Strict; logout las limpia con los mismos atributos"
   }
+
+  dynamic view relayer_vault_flow {
+    title "Relayer de gas y vault de secretos (VOTAR-497)"
+    description "El cliente no tiene clave de gas. Autorización autenticada sin cuerpo de voto + broadcast anónimo; el contrato no exige un rol de relayer, msg.sender solo paga gas."
+
+    votar.api.vaultService -> secretsVault "0. hydrateSecretsFromVault, antes de NestFactory (producción rechaza SECRETS_VAULT_PROVIDER=env)"
+
+    votante -> votar.bud.blockchainClient "1. Confirma sufragio ya firmado (billetera efímera)"
+    votar.bud.blockchainClient -> votar.api.relayerService "2. POST /relayer/autorizacion (JWT votante, sin cuerpo de voto)"
+    votar.api.relayerService -> votar.api.dataAccess "3. INSERT token_hash=sha256(token), expira_en (sin votante_hash, nullifier ni selección)"
+    votar.api.relayerService -> votar.api.auditLogger "4. RELAYER_CAPACIDAD_EMITIDA (actor ofuscado)"
+    votar.api.relayerService -> votar.bud.blockchainClient "5. 200 { relayToken, expiresAt }"
+
+    votar.bud.blockchainClient -> votar.api.relayerService "6. POST /relayer/cast { relayToken, voto firmado } (credentials: omit)"
+    votar.api.relayerService -> votar.api.dataAccess "7. UPDATE consumida_en WHERE token_hash AND id_eleccion AND consumida_en IS NULL AND expira_en > now()"
+    votar.api.relayerService -> votar.api.merkleBuilder "8. obtenerProofVotante (proof de servidor, no la del cliente)"
+    votar.api.relayerService -> votar.api.vaultService "9. getSecret(RELAYER_PRIVATE_KEY)"
+    votar.api.relayerService -> rpc "10. castSignedVote (margen de gas 1.1)"
+    rpc -> votar.contracts.ballotContract "11. msg.sender = relayer (solo paga gas)"
+    votar.contracts.ballotContract -> votar.api.relayerService "12. txHash"
+    votar.api.relayerService -> votar.api.auditLogger "13. RELAYER_CAST_ENVIADO (ANONIMO; sin nullifier/selección/txHash)"
+    votar.api.relayerService -> votar.bud.blockchainClient "14. 200 { txHash }"
+
+    votar.bud.blockchainClient -> rpc "15. waitForTransactionReceipt (sin clave privada); si ya hay txHash, no rebroadcasta"
+  }
 }
